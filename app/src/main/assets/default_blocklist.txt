@@ -1,0 +1,72 @@
+# SafeBrowse starter blocklist
+# One domain per line. Lines beginning with # are ignored.
+# Subdomains are covered automatically by suffix matching, so "example.com"
+# also blocks www.example.com and cdn.video.example.com.
+#
+# This list is a starting point, not a policy. Everything here can be removed
+# through the app — which means reading Romans 6 first.
+
+# ---- Large adult video platforms ----
+pornhub.com
+xvideos.com
+xhamster.com
+xnxx.com
+redtube.com
+youporn.com
+spankbang.com
+eporner.com
+tube8.com
+txxx.com
+hclips.com
+porntrex.com
+beeg.com
+tnaflix.com
+drtuber.com
+sunporno.com
+perfectgirls.net
+nuvid.com
+alphaporno.com
+bravotube.net
+porn.com
+sex.com
+
+# ---- Studios and networks ----
+brazzers.com
+bangbros.com
+naughtyamerica.com
+realitykings.com
+digitalplayground.com
+evilangel.com
+mofos.com
+kink.com
+
+# ---- Cam and hookup sites ----
+chaturbate.com
+stripchat.com
+myfreecams.com
+bongacams.com
+livejasmin.com
+cam4.com
+streamate.com
+flirt4free.com
+adultfriendfinder.com
+ashleymadison.com
+
+# ---- Adult comic and animation sites ----
+nhentai.net
+hanime.tv
+hitomi.la
+fakku.net
+luscious.net
+8muses.com
+
+# ---- DNS-over-HTTPS endpoints ----
+# A browser resolving names over HTTPS never asks the system resolver, so it
+# never reaches this filter. Blocking the well-known DoH endpoints forces a
+# fallback to normal DNS, which we do see. Remove these if you rely on DoH.
+cloudflare-dns.com
+dns.google
+doh.opendns.com
+dns.quad9.net
+mozilla.cloudflare-dns.com
+dns.nextdns.io

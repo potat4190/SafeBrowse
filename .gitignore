@@ -1,0 +1,17 @@
+# Build output and local machine config
+.gradle/
+build/
+local.properties
+.idea/workspace.xml
+.idea/caches/
+
+# Release signing: never commit these
+keystore.properties
+*.jks
+*.keystore
+
+# Kotlin compiler caches, JVM heap dumps, per-user tool settings
+.kotlin/
+*.hprof
+.claude/settings.local.json
+.idea/deploymentTargetSelector.xml
