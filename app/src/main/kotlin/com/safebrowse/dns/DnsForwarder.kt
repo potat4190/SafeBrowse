@@ -7,6 +7,8 @@ import java.io.IOException
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.concurrent.thread
 
 /**
  * Sends allowed queries on to a real resolver.
@@ -19,8 +21,13 @@ import java.net.InetAddress
  * hotel, corporate Wi-Fi) drop DNS to anything but their own resolver, and
  * there every query to 1.1.1.1 just times out. So when it fails, the query
  * goes to the underlying network's own resolvers ([networkDns]) instead, and
- * those stay first for [FALLBACK_HOLD_MS] before the configured one is tried
- * again. Filtering is unaffected: the blocklist is applied before forwarding.
+ * those stay first. Every [FALLBACK_HOLD_MS] the configured one is probed
+ * again on a background thread, never in the path of a real lookup: a probe
+ * that times out must not stall the queries waiting behind it.
+ * Filtering is unaffected: the blocklist is applied before forwarding.
+ *
+ * Answers are kept in a [DnsCache] for their TTL, so a repeat lookup costs no
+ * network round trip.
  */
 class DnsForwarder(
     private val upstreamIp: String = CLOUDFLARE_DNS,
@@ -54,15 +61,30 @@ class DnsForwarder(
 
     private val configured = Upstream(InetAddress.getByName(upstreamIp), port = port)
 
-    /** Until when the network's own resolvers go first. */
+    /**
+     * 0 while the configured resolver is in use. Otherwise the network's own
+     * resolvers go first, and this is when the configured one is next probed.
+     */
     @Volatile private var fallbackUntil = 0L
+    private val probing = AtomicBoolean(false)
+
+    private val cache = DnsCache(clock)
 
     /** Blocking call — must run on an IO dispatcher. Returns null if every resolver failed. */
     fun forward(rawQuery: ByteArray): ByteArray? {
+        cache.get(rawQuery)?.let { return it }
+        return resolve(rawQuery)?.also { cache.put(rawQuery, it) }
+    }
+
+    /** Drop cached answers, e.g. on a network change, where they may no longer hold. */
+    fun clearCache() = cache.clear()
+
+    private fun resolve(rawQuery: ByteArray): ByteArray? {
         val network = networkDns().filter {
             it.address != configured.address || it.port != configured.port
         }
-        val onFallback = clock() < fallbackUntil
+        val onFallback = fallbackUntil != 0L && network.isNotEmpty()
+        if (onFallback && clock() >= fallbackUntil) probeConfigured(rawQuery)
         val order = if (onFallback) network + configured else listOf(configured) + network
 
         for (upstream in order) {
@@ -76,6 +98,24 @@ class DnsForwarder(
             return answer
         }
         return null
+    }
+
+    /** Off the request path, at most one at a time; switches back if it answers. */
+    private fun probeConfigured(rawQuery: ByteArray) {
+        if (!probing.compareAndSet(false, true)) return
+        val probe = rawQuery.copyOf()
+        thread(isDaemon = true, name = "dns-probe") {
+            try {
+                if (query(configured, probe) != null) {
+                    Log.i(TAG, "Configured resolver reachable again")
+                    fallbackUntil = 0L
+                } else {
+                    fallbackUntil = clock() + FALLBACK_HOLD_MS
+                }
+            } finally {
+                probing.set(false)
+            }
+        }
     }
 
     private fun query(upstream: Upstream, rawQuery: ByteArray): ByteArray? {

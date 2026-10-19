@@ -43,11 +43,15 @@ import javax.inject.Inject
  *
  * A local VpnService gives us a TUN interface that carries the device's DNS
  * queries (and nothing else; see [buildVpnInterface]). We read from it, pick
- * out UDP queries to port 53, and decide:
+ * out UDP queries to port 53 (over IPv4 or IPv6), and decide:
  *
  *   blocked  -> synthesize NXDOMAIN and write it straight back
  *   allowed  -> forward to the upstream resolver on a protected socket,
  *               then write the real answer back
+ *
+ * Anything else that reaches the tunnel is refused on the spot (TCP reset,
+ * ICMP unreachable) rather than dropped, so the app gives up at once instead
+ * of waiting out a timeout.
  *
  * No traffic leaves the device except ordinary DNS to the configured resolver,
  * or to the network's own resolver where the configured one is unreachable
@@ -70,6 +74,9 @@ class SafeVpnService : VpnService() {
 
         private const val VPN_ADDRESS = "10.0.0.2"
         private const val VPN_PREFIX_LENGTH = 32
+        /** Unique-local, so it can never clash with a real IPv6 address. */
+        private const val VPN_ADDRESS_V6 = "fd5a:fe00:b10c::2"
+        private const val VPN_PREFIX_LENGTH_V6 = 128
         private const val VPN_DNS = "10.0.0.1"
         private const val SESSION_NAME = "SafeBrowse"
         private const val PACKET_BUFFER_SIZE = 32_768
@@ -78,16 +85,22 @@ class SafeVpnService : VpnService() {
         /**
          * Well-known public resolvers, routed into the tunnel so an app that
          * hard-codes one of them is filtered too. Plain DNS to these is
-         * answered like any other query; DoH and DoT to them get no reply, so
-         * they fail closed instead of slipping past the blocklist. Our own
-         * upstream socket is protected, so it still reaches them directly.
+         * answered like any other query; DoH and DoT to them are refused, so
+         * they fail closed (and fast) instead of slipping past the blocklist.
+         * Our own upstream socket is protected, so it still reaches them
+         * directly.
          */
         private val PUBLIC_RESOLVERS = listOf(
             "1.1.1.1", "1.0.0.1",                 // Cloudflare
             "8.8.8.8", "8.8.4.4",                 // Google
             "9.9.9.9", "149.112.112.112",         // Quad9
             "208.67.222.222", "208.67.220.220",   // OpenDNS
-            "94.140.14.14", "94.140.15.15"        // AdGuard
+            "94.140.14.14", "94.140.15.15",       // AdGuard
+            "2606:4700:4700::1111", "2606:4700:4700::1001",
+            "2001:4860:4860::8888", "2001:4860:4860::8844",
+            "2620:fe::fe", "2620:fe::9",
+            "2620:119:35::35", "2620:119:53::53",
+            "2a10:50c0::ad1:ff", "2a10:50c0::ad2:ff"
         )
 
         const val ACTION_START = "com.safebrowse.vpn.START"
@@ -144,11 +157,14 @@ class SafeVpnService : VpnService() {
 
         override fun onLinkPropertiesChanged(network: Network, lp: LinkProperties) {
             underlyingDns[network] = UnderlyingNetwork(lp.dnsServers, wifi[network] ?: false)
+            // Answers can differ per network (captive portals, split DNS).
+            dnsForwarder?.clearCache()
         }
 
         override fun onLost(network: Network) {
             wifi.remove(network)
             underlyingDns.remove(network)
+            dnsForwarder?.clearCache()
         }
     }
 
@@ -318,6 +334,13 @@ class SafeVpnService : VpnService() {
      * public resolvers, so DNS queries reach us while all other traffic keeps
      * using the normal network. Routing 0.0.0.0/0 here would pull every IPv4
      * packet into a loop that only answers DNS, cutting the device off.
+     *
+     * IPv6 needs an address and routes of its own. A VPN that configures no
+     * IPv6 at all gets every IPv6 packet on the device blocked by Android,
+     * which forces apps onto IPv4 (slower behind carrier NAT, and a wait for
+     * the IPv6 attempt to fail first). With the IPv6 resolver routes in
+     * place, other IPv6 traffic uses the normal network like IPv4 does;
+     * allowFamily says so explicitly.
      */
     private fun buildVpnInterface(): ParcelFileDescriptor? {
         val configure = PendingIntent.getActivity(
@@ -327,11 +350,13 @@ class SafeVpnService : VpnService() {
         val builder = Builder()
             .setSession(SESSION_NAME)
             .addAddress(VPN_ADDRESS, VPN_PREFIX_LENGTH)
+            .addAddress(VPN_ADDRESS_V6, VPN_PREFIX_LENGTH_V6)
             .addDnsServer(VPN_DNS)
             .addRoute(VPN_DNS, 32)
             .setBlocking(true)
             .setConfigureIntent(configure)
-        PUBLIC_RESOLVERS.forEach { builder.addRoute(it, 32) }
+        PUBLIC_RESOLVERS.forEach { builder.addRoute(it, if (':' in it) 128 else 32) }
+        builder.allowFamily(OsConstants.AF_INET6)
         return builder.establish()
     }
 
@@ -395,7 +420,13 @@ class SafeVpnService : VpnService() {
                 buffer.clear()
                 buffer.limit(length)
 
-                val payload = PacketUtils.extractDnsPayload(buffer, length) ?: continue
+                val payload = PacketUtils.extractDnsPayload(buffer, length)
+                if (payload == null) {
+                    PacketUtils.buildRejection(packet, length)?.let { reply ->
+                        synchronized(output) { output.write(reply) }
+                    }
+                    continue
+                }
                 val query = DnsParser.parse(payload.dnsBytes, payload.dnsBytes.size)
                 if (query == null) {
                     // Answer it rather than drop it: a dropped query is an app
