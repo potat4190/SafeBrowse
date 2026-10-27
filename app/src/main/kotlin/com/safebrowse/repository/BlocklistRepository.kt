@@ -23,27 +23,41 @@ class BlocklistRepository @Inject constructor(
         private const val TAG = "BlocklistRepository"
         private const val DEFAULT_ASSET = "default_blocklist.txt"
         private const val BATCH_SIZE = 500
+        private const val VERSION_MARKER = "#@version"
     }
 
     fun observeAll(): Flow<List<BlockedDomain>> = dao.observeAll()
     fun search(query: String): Flow<List<BlockedDomain>> = dao.search(query)
     fun observeTotalCount(): Flow<Int> = dao.observeTotalCount()
 
-    /** Load the bundled starter list once, on first launch. Idempotent. */
+    /**
+     * Load the bundled list. On first launch this loads everything; after an app
+     * update it loads only sections with a newer "#@version" than last time, so
+     * defaults removed through the gate are not brought back. Idempotent.
+     */
     suspend fun seedDefaultBlocklistIfNeeded() = withContext(Dispatchers.IO) {
-        if (preferences.isDefaultListLoaded()) return@withContext
         try {
-            val domains = context.assets.open(DEFAULT_ASSET).bufferedReader().useLines { lines ->
-                lines.map { it.trim() }
-                    .filter { it.isNotBlank() && !it.startsWith("#") }
-                    .mapNotNull { DomainNormalizer.normalize(it) }
-                    .distinct()
-                    .map { BlockedDomain(domain = it, isDefault = true) }
-                    .toList()
+            val loadedVersion = preferences.getDefaultListVersion()
+            var version = 1
+            var latest = 1
+            val domains = mutableListOf<String>()
+            context.assets.open(DEFAULT_ASSET).bufferedReader().useLines { lines ->
+                for (raw in lines) {
+                    val line = raw.trim()
+                    if (line.startsWith(VERSION_MARKER)) {
+                        version = line.removePrefix(VERSION_MARKER).trim().toIntOrNull() ?: version
+                        latest = maxOf(latest, version)
+                        continue
+                    }
+                    if (line.isBlank() || line.startsWith("#") || version <= loadedVersion) continue
+                    DomainNormalizer.normalize(line)?.let { domains += it }
+                }
             }
-            domains.chunked(BATCH_SIZE).forEach { dao.insertAll(it) }
-            preferences.setDefaultListLoaded(true)
-            Log.i(TAG, "Seeded ${domains.size} default domains")
+            if (latest <= loadedVersion) return@withContext
+            val entries = domains.distinct().map { BlockedDomain(domain = it, isDefault = true) }
+            entries.chunked(BATCH_SIZE).forEach { dao.insertAll(it) }
+            preferences.setDefaultListVersion(latest)
+            Log.i(TAG, "Seeded ${entries.size} default domains (list v$loadedVersion -> v$latest)")
         } catch (e: Exception) {
             Log.e(TAG, "Could not seed the default blocklist", e)
         }

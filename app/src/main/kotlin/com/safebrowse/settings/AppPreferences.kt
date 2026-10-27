@@ -26,6 +26,7 @@ class AppPreferences @Inject constructor(
         val START_ON_BOOT = booleanPreferencesKey("start_on_boot")
         val DNS_SERVER = stringPreferencesKey("dns_server")
         val DEFAULT_LIST_LOADED = booleanPreferencesKey("default_list_loaded")
+        val DEFAULT_LIST_VERSION = intPreferencesKey("default_list_version")
         val READINGS = intPreferencesKey("romans6_readings")
     }
 
@@ -40,12 +41,22 @@ class AppPreferences @Inject constructor(
         context.dataStore.data.map { it[Keys.READINGS] ?: 0 }
 
     suspend fun getDnsServer(): String = dnsServerFlow.first()
-    suspend fun isDefaultListLoaded(): Boolean =
-        context.dataStore.data.map { it[Keys.DEFAULT_LIST_LOADED] ?: false }.first()
+    /**
+     * Highest "#@version" section of the bundled list already loaded.
+     * Installs from before versioning only have the old boolean, which meant version 1.
+     */
+    suspend fun getDefaultListVersion(): Int = context.dataStore.data.map {
+        it[Keys.DEFAULT_LIST_VERSION] ?: if (it[Keys.DEFAULT_LIST_LOADED] == true) 1 else 0
+    }.first()
 
     suspend fun setStartOnBoot(v: Boolean) { context.dataStore.edit { it[Keys.START_ON_BOOT] = v } }
     suspend fun setDnsServer(ip: String) { context.dataStore.edit { it[Keys.DNS_SERVER] = ip } }
-    suspend fun setDefaultListLoaded(v: Boolean) { context.dataStore.edit { it[Keys.DEFAULT_LIST_LOADED] = v } }
+    suspend fun setDefaultListVersion(v: Int) {
+        context.dataStore.edit {
+            it[Keys.DEFAULT_LIST_VERSION] = v
+            it[Keys.DEFAULT_LIST_LOADED] = true
+        }
+    }
 
     suspend fun incrementReadings() {
         context.dataStore.edit { it[Keys.READINGS] = (it[Keys.READINGS] ?: 0) + 1 }
